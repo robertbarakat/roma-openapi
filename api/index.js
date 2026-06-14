@@ -12,36 +12,65 @@ app.get("/", (req, res) => {
   res.json({ status: "ok", api: "roma-openapi" });
 });
 
-// lista dataset (pulita)
+// lista dataset (pulita e COMPLETA)
 app.get("/datasets", async (req, res) => {
   try {
-    const list = await axios.get(`${BASE}/package_list`);
-    const ids = list.data.result.slice(0, 50);
+    let allResults = [];
+    let start = 0;
+    const rowsPerPage = 100; // CKAN digerisce bene 100 record a chiamata
+    let totalCount = 0;
 
-    const out = [];
+    // Ciclo per recuperare TUTTI i dataset paginati a monte da CKAN
+    do {
+      const r = await axios.get(`${BASE}/package_search`, {
+        params: {
+          q: "*:*", // Prende tutto il catalogo
+          rows: rowsPerPage,
+          start: start
+        }
+      });
 
-    for (const id of ids) {
-      try {
-        const r = await axios.get(`${BASE}/package_show`, {
-          params: { id }
-        });
+      const { count, results } = r.data.result;
+      
+      if (start === 0) {
+        totalCount = count; // Imposta il totale reale del catalogo alla prima chiamata
+      }
 
-        const p = r.data.result;
+      allResults = [...allResults, ...results];
+      start += rowsPerPage;
 
-        out.push({
-          codice: p.name,
-          servizio: p.title
-        });
-      } catch {}
-    }
+    } while (start < totalCount);
+
+    // Mappatura finale con i nuovi campi richiesti
+    const out = allResults.map(p => ({
+      codice: p.name,
+      servizio: p.title,
+      // Mappiamo l'array delle risorse collegate al dataset
+      resources: (p.resources || []).map(res => {
+        const formatNormalized = res.format ? res.format.toLowerCase() : 'unknown';
+        const baseDataStoreUrl = "https://dati.comune.roma.it/catalog/api/3/action/datastore_search";
+        
+        return {
+          id: res.id,
+          name: res.name,
+          url: res.url, // URL del file statico originale
+          resourceResponseType: formatNormalized, // json / csv / xlsx ecc.
+          apiEndpoint: `${baseDataStoreUrl}?resource_id=${res.id}` // API diretta da chiamare
+        };
+      })
+    }));
+
+    // Opzionale: aggiunge un header di cache per velocizzare le chiamate successive su Vercel
+    res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
 
     res.json(out);
   } catch (e) {
-    res.status(500).json({ error: "CKAN error" });
+    console.error(e);
+    res.status(500).json({ error: "CKAN error durante il recupero dei dataset" });
   }
 });
 
-// search
+// search (aggiornato per includere i dettagli delle risorse anche qui)
 app.get("/search", async (req, res) => {
   try {
     const q = req.query.q || "";
@@ -53,7 +82,14 @@ app.get("/search", async (req, res) => {
     res.json(
       r.data.result.results.map(p => ({
         codice: p.name,
-        servizio: p.title
+        servizio: p.title,
+        resources: (p.resources || []).map(res => ({
+          id: res.id,
+          name: res.name,
+          url: res.url,
+          resourceResponseType: res.format ? res.format.toLowerCase() : 'unknown',
+          apiEndpoint: `https://dati.comune.roma.it/catalog/api/3/action/datastore_search?resource_id=${res.id}`
+        }))
       }))
     );
   } catch {
